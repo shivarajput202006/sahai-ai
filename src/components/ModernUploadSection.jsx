@@ -1,0 +1,572 @@
+import { useState, useCallback, useRef } from 'react';
+import { useDropzone } from 'react-dropzone';
+import { motion, AnimatePresence } from 'framer-motion';
+import { 
+  Camera, Mic, Upload, FileText, Loader, X, 
+  CheckCircle, AlertCircle, File, Image, 
+  Zap, Clock, Shield 
+} from 'lucide-react';
+import { processUploadedFile } from '../services/api/ocrService';
+import { OpenRouterService } from '../services/api/openRouterService';
+import { DataService } from '../services/dataService';
+// Voice functionality temporarily disabled - speechService removed
+import { useAuth } from '../auth';
+import { useLanguage } from '../contexts/LanguageContext';
+
+const ModernUploadSection = ({ onSchemesFound }) => {
+  const { t, currentLanguage } = useLanguage();
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recorder, setRecorder] = useState(null);
+  const [showTextModal, setShowTextModal] = useState(false);
+  const [textInput, setTextInput] = useState('');
+  const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [processingStep, setProcessingStep] = useState('');
+  const [error, setError] = useState(null);
+  const [showCamera, setShowCamera] = useState(false);
+  const [stream, setStream] = useState(null);
+  const fileInputRef = useRef(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const { user } = useAuth();
+
+  const updateProgress = (step, percentage) => {
+    setProcessingStep(step);
+    setProgress(percentage);
+  };
+
+  const onDrop = useCallback(async (acceptedFiles) => {
+    const file = acceptedFiles[0];
+    if (!file) return;
+
+    setIsProcessing(true);
+    setError(null);
+    setUploadedFiles([file]);
+    
+    try {
+      updateProgress('Processing document...', 10);
+      
+      updateProgress('Extracting text with OCR...', 30);
+      const extractedText = await processUploadedFile(file);
+      
+      if (!extractedText.trim()) {
+        throw new Error('No text could be extracted from the document');
+      }
+
+      updateProgress('Analyzing document with AI...', 60);
+      
+      const userProfile = await OpenRouterService.analyzeDocument(extractedText, currentLanguage);
+      
+      if (!userProfile) {
+        throw new Error('Could not extract profile information from document');
+      }
+
+      updateProgress('Finding eligible schemes...', 80);
+      
+      // Get personalized schemes based on user profile
+      const schemes = await OpenRouterService.findSchemes(userProfile, currentLanguage);
+      
+      updateProgress('Analysis complete!', 100);
+      
+      if (onSchemesFound) {
+        onSchemesFound(userProfile, schemes);
+      }
+      
+    } catch (error) {
+      console.error('Processing error:', error);
+      setError(error.message || 'Failed to process document');
+    } finally {
+      setTimeout(() => {
+        setIsProcessing(false);
+        setProgress(0);
+        setProcessingStep('');
+        setUploadedFiles([]);
+      }, 2000);
+    }
+  }, [onSchemesFound, currentLanguage]);
+
+  const handleVoiceInput = async () => {
+    setError('Voice input feature is temporarily unavailable.');
+  };
+
+  const handleTakePhoto = async () => {
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const mediaStream = await navigator.mediaDevices.getUserMedia({ 
+          video: { facingMode: 'environment' } 
+        });
+        setStream(mediaStream);
+        setShowCamera(true);
+        
+        // Wait for video element to be ready
+        setTimeout(() => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = mediaStream;
+            videoRef.current.play().catch(e => console.error('Play error:', e));
+          }
+        }, 100);
+      } else {
+        // Fallback to file picker
+        fileInputRef.current?.click();
+      }
+    } catch (error) {
+      console.error('Camera access error:', error);
+      setError('Camera access denied. Using file picker instead.');
+      fileInputRef.current?.click();
+    }
+  };
+
+  const capturePhoto = async () => {
+    console.log('Capture photo clicked');
+    
+    if (!videoRef.current) {
+      console.error('Video ref not available');
+      return;
+    }
+    
+    if (!canvasRef.current) {
+      console.error('Canvas ref not available');
+      return;
+    }
+    
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    
+    console.log('Video dimensions:', video.videoWidth, video.videoHeight);
+    
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      console.error('Video not ready');
+      return;
+    }
+    
+    try {
+      const context = canvas.getContext('2d');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      
+      context.drawImage(video, 0, 0);
+      console.log('Image drawn to canvas');
+      
+      // Convert to blob
+      canvas.toBlob(async (blob) => {
+        if (blob) {
+          console.log('Blob created:', blob.size, 'bytes');
+          
+          // Create file-like object from blob
+          const file = Object.assign(blob, {
+            name: `document-${Date.now()}.jpg`,
+            lastModified: Date.now()
+          });
+          
+          console.log('File created:', file.name, file.size);
+          
+          closeCamera();
+          setIsProcessing(true);
+          await onDrop([file]);
+        } else {
+          console.error('Failed to create blob');
+        }
+      }, 'image/jpeg', 0.8);
+    } catch (error) {
+      console.error('Capture error:', error);
+    }
+  };
+
+  const closeCamera = () => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      setStream(null);
+    }
+    setShowCamera(false);
+  };
+
+  const handleFileSelect = async (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      await onDrop([file]);
+    }
+  };
+
+  const handleTextSubmit = async () => {
+    if (!textInput.trim()) return;
+    
+    setIsProcessing(true);
+    setError(null);
+    setShowTextModal(false);
+    
+    try {
+      updateProgress('Analyzing text input...', 30);
+      
+      const userProfile = await OpenRouterService.analyzeDocument(textInput, currentLanguage);
+      
+      if (!userProfile) {
+        throw new Error('Could not extract profile information from text');
+      }
+
+      updateProgress('Finding eligible schemes...', 80);
+      
+      // Get personalized schemes based on user profile
+      const schemes = await OpenRouterService.findSchemes(userProfile, currentLanguage);
+      
+      updateProgress('Text analysis complete!', 100);
+      
+      if (onSchemesFound) {
+        onSchemesFound(userProfile, schemes);
+      }
+      
+    } catch (error) {
+      console.error('Text processing error:', error);
+      setError(error.message || 'Failed to process text input');
+    } finally {
+      setTimeout(() => {
+        setIsProcessing(false);
+        setProgress(0);
+        setProcessingStep('');
+        setTextInput('');
+      }, 2000);
+    }
+  };
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'image/*': ['.jpeg', '.jpg', '.png', '.webp'],
+      'application/pdf': ['.pdf']
+    },
+    multiple: false,
+    maxSize: 10 * 1024 * 1024 // 10MB
+  });
+
+  return (
+    <section className="py-16 px-4 sm:px-6 lg:px-8 bg-white">
+
+      <div className="max-w-6xl mx-auto">
+        {/* Simple Header */}
+        <div className="text-center mb-12">
+          <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-blue-100 text-blue-700 mb-4">
+            <Zap size={14} />
+            <span className="text-sm font-medium">{t('advancedAI')}</span>
+          </div>
+          
+          <h2 className="text-3xl font-bold text-gray-900 mb-4">
+            {t('intelligentAnalysis')}
+          </h2>
+          
+          <p className="text-gray-600 max-w-2xl mx-auto">
+            {t('uploadDescription')}
+          </p>
+        </div>
+
+        {/* Simple Upload Area */}
+        <div className="relative">
+          <div
+            className={`border-2 border-dashed p-8 text-center cursor-pointer rounded-lg transition-colors ${
+              isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 bg-gray-50'
+            }`}
+            {...getRootProps()}
+          >
+            <input {...getInputProps()} />
+            
+            {isProcessing ? (
+              <div className="space-y-6">
+                <div className="w-16 h-16 mx-auto bg-blue-600 rounded-full flex items-center justify-center">
+                  <Zap className="w-8 h-8 text-white" />
+                </div>
+                
+                <div>
+                  <p className="text-lg font-semibold text-gray-900 mb-4">
+                    {processingStep || t('analyzing')}
+                  </p>
+                  
+                  <div className="w-full max-w-md mx-auto">
+                    <div className="bg-gray-200 rounded-full h-3 mb-2">
+                      <div 
+                        className="bg-blue-600 h-3 rounded-full transition-all duration-300"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                    <p className="text-sm text-gray-600">
+                      {progress}% Complete
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : error ? (
+              <div className="space-y-4">
+                <div className="w-16 h-16 mx-auto bg-red-100 rounded-full flex items-center justify-center">
+                  <AlertCircle className="w-8 h-8 text-red-500" />
+                </div>
+                <div>
+                  <p className="text-lg font-semibold text-red-600 mb-2">
+                    {t('processingFailed')}
+                  </p>
+                  <p className="text-sm text-red-500 mb-4">
+                    {error}
+                  </p>
+                  <button 
+                    onClick={() => setError(null)}
+                    className="bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors"
+                  >
+                    {t('tryAgain')}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                <div className="w-16 h-16 mx-auto bg-blue-600 rounded-lg flex items-center justify-center">
+                  <Upload className="w-8 h-8 text-white" />
+                </div>
+                
+                <div>
+                  <p className="text-lg font-semibold text-gray-900 mb-2">
+                    {isDragActive ? t('dragDrop') : t('dragDrop')}
+                  </p>
+                  <p className="text-sm text-gray-600">
+                    {t('clickBrowse')}
+                  </p>
+                </div>
+
+                <div className="flex justify-center space-x-6">
+                  <div className="text-center">
+                    <File className="w-8 h-8 text-red-500 mx-auto mb-1" />
+                    <span className="text-xs text-gray-600">PDF</span>
+                  </div>
+                  <div className="text-center">
+                    <Image className="w-8 h-8 text-green-500 mx-auto mb-1" />
+                    <span className="text-xs text-gray-600">Images</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Simple Security Badge */}
+          <div className="absolute -top-3 right-4">
+            <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-green-100 border border-green-200">
+              <Shield className="w-4 h-4 text-green-600" />
+              <span className="text-xs font-medium text-green-700">
+                Secure & Private
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Simple Alternative Input Methods */}
+        <div className="grid md:grid-cols-3 gap-6 mt-8">
+          <button 
+            onClick={handleTakePhoto}
+            disabled={isProcessing}
+            className="bg-white border rounded-lg p-6 text-center hover:shadow-md transition-shadow disabled:opacity-50"
+          >
+            <div className="w-12 h-12 mx-auto mb-4 bg-blue-600 rounded-lg flex items-center justify-center">
+              <Camera className="w-6 h-6 text-white" />
+            </div>
+            <h3 className="font-semibold text-gray-900 mb-2">
+              Take Photo
+            </h3>
+            <p className="text-sm text-gray-600">
+              Capture documents with your camera
+            </p>
+          </button>
+          
+          <button 
+            onClick={handleVoiceInput}
+            disabled={isProcessing}
+            className={`bg-white border rounded-lg p-6 text-center hover:shadow-md transition-shadow disabled:opacity-50 ${
+              isRecording ? 'border-red-300 bg-red-50' : ''
+            }`}
+          >
+            <div className={`w-12 h-12 mx-auto mb-4 rounded-lg flex items-center justify-center ${
+              isRecording ? 'bg-red-500' : 'bg-blue-600'
+            }`}>
+              <Mic className="w-6 h-6 text-white" />
+            </div>
+            <h3 className="font-semibold text-gray-900 mb-2">
+              {isRecording ? 'Recording...' : t('voiceInput')}
+            </h3>
+            <p className="text-sm text-gray-600">
+              {isRecording ? 'Click to stop recording' : t('voiceInputDesc')}
+            </p>
+          </button>
+          
+          <button 
+            onClick={() => setShowTextModal(true)}
+            disabled={isProcessing}
+            className="bg-white border rounded-lg p-6 text-center hover:shadow-md transition-shadow disabled:opacity-50"
+          >
+            <div className="w-12 h-12 mx-auto mb-4 bg-blue-600 rounded-lg flex items-center justify-center">
+              <FileText className="w-6 h-6 text-white" />
+            </div>
+            <h3 className="font-semibold text-gray-900 mb-2">
+              {t('typeDetails')}
+            </h3>
+            <p className="text-sm text-gray-600">
+              {t('typeDetailsDesc')}
+            </p>
+          </button>
+        </div>
+
+        {/* Hidden file input for fallback */}
+        <input 
+          ref={fileInputRef}
+          type="file" 
+          accept="image/*" 
+          onChange={handleFileSelect}
+          className="hidden"
+        />
+
+        {/* Camera Modal */}
+        <AnimatePresence>
+          {showCamera && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-50 p-4"
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="bg-white rounded-xl max-w-2xl w-full p-6 relative"
+              >
+                <button
+                  onClick={closeCamera}
+                  className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 z-10"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+
+                <div className="text-center mb-4">
+                  <h3 className="text-xl font-bold text-gray-900 mb-2">Capture Document</h3>
+                  <p className="text-gray-600">Position your document in the frame and click capture</p>
+                </div>
+
+                <div className="relative bg-black rounded-lg overflow-hidden mb-4">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-64 object-cover"
+                    onLoadedMetadata={() => console.log('Video loaded')}
+                    onError={(e) => console.error('Video error:', e)}
+                  />
+                  <canvas ref={canvasRef} className="hidden" />
+                  
+                  {/* Camera overlay */}
+                  <div className="absolute inset-4 border-2 border-white border-dashed rounded-lg pointer-events-none">
+                    <div className="absolute top-2 left-2 w-4 h-4 border-l-2 border-t-2 border-blue-500"></div>
+                    <div className="absolute top-2 right-2 w-4 h-4 border-r-2 border-t-2 border-blue-500"></div>
+                    <div className="absolute bottom-2 left-2 w-4 h-4 border-l-2 border-b-2 border-blue-500"></div>
+                    <div className="absolute bottom-2 right-2 w-4 h-4 border-r-2 border-b-2 border-blue-500"></div>
+                  </div>
+                </div>
+
+                <div className="flex space-x-3">
+                  <button
+                    onClick={capturePhoto}
+                    className="flex-1 bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center justify-center space-x-2"
+                  >
+                    <Camera className="w-5 h-5" />
+                    <span>Capture Photo</span>
+                  </button>
+                  <button
+                    onClick={closeCamera}
+                    className="px-6 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Text Input Modal */}
+        <AnimatePresence>
+          {showTextModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="card p-8 w-full max-w-2xl"
+              >
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-2xl font-semibold" style={{ color: 'var(--text)' }}>
+                    {t('enterDetails')}
+                  </h3>
+                  <button 
+                    onClick={() => setShowTextModal(false)}
+                    className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                
+                <textarea
+                  value={textInput}
+                  onChange={(e) => setTextInput(e.target.value)}
+                  placeholder="Enter details like: Name, Age, Location (State/District), Occupation, Annual Income, Caste Category (General/SC/ST/OBC), Gender, Marital Status, Education Level, Land Ownership, Family Size, etc."
+                  className="w-full h-40 p-4 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
+                  style={{
+                    backgroundColor: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text)'
+                  }}
+                />
+                
+                <div className="flex space-x-4 mt-6">
+                  <button
+                    onClick={() => setShowTextModal(false)}
+                    className="flex-1 btn btn-secondary"
+                  >
+                    {t('cancel')}
+                  </button>
+                  <button
+                    onClick={handleTextSubmit}
+                    disabled={!textInput.trim()}
+                    className="flex-1 btn btn-primary disabled:opacity-50"
+                  >
+                    <Zap size={16} />
+                    {t('analyzeText')}
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* AI Capabilities Stats */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-12">
+          {[
+            { icon: <Zap className="w-6 h-6" />, value: '15+', label: t('aiModels') },
+            { icon: <CheckCircle className="w-6 h-6" />, value: '99.2%', label: t('aiAccuracy') },
+            { icon: <Shield className="w-6 h-6" />, value: '24/7', label: t('aiAssistant') }
+          ].map((stat, index) => (
+            <div key={index} className="text-center p-6 bg-gray-50 rounded-lg">
+              <div className="flex justify-center mb-3 text-blue-600">
+                {stat.icon}
+              </div>
+              <div className="text-2xl font-bold text-gray-900 mb-1">
+                {stat.value}
+              </div>
+              <div className="text-sm text-gray-600">
+                {stat.label}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+};
+
+export default ModernUploadSection;
